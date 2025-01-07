@@ -115,18 +115,20 @@ dummy_country <- dummyvar(waterfetch$dhscc,colremove=TRUE)
 dummy_month <- dummyvar(waterfetch$month,colremove=TRUE)
 # Run dummyvar on year to get dummy variables for each year
 dummy_year <- dummyvar(waterfetch$year,colremove=TRUE)
+# Run dummyvar on county to get dummy variables for each county
+dummy_county <- dummyvar(waterfetch$new_hv024,colremove=TRUE)
 
 # Running batchlm for each lag
 climate_6d7dl <- do.call(rbind.data.frame,mclapply(climatevar,batchlm,dependent=waterfetch$hv204,data=waterfetch,
-                                                   timelag=lags[1],dummy_country,dummy_month,dummy_year,mc.cores=numcores))
+                                                   timelag=lags[1],dummy_country,dummy_month,dummy_year,dummy_county,mc.cores=numcores))
 climate_29d30dl <- do.call(rbind.data.frame,mclapply(climatevar,batchlm,dependent=waterfetch$hv204,data=waterfetch,
-                                                     timelag=lags[2],dummy_country,dummy_month,dummy_year,mc.cores=numcores))
+                                                     timelag=lags[2],dummy_country,dummy_month,dummy_year,dummy_county,mc.cores=numcores))
 climate_89d90dl <- do.call(rbind.data.frame,mclapply(climatevar,batchlm,dependent=waterfetch$hv204,data=waterfetch,
-                                                     timelag=lags[3],dummy_country,dummy_month,dummy_year,mc.cores=numcores))
+                                                     timelag=lags[3],dummy_country,dummy_month,dummy_year,dummy_county,mc.cores=numcores))
 climate_179d180dl <- do.call(rbind.data.frame,mclapply(climatevar,batchlm,dependent=waterfetch$hv204,data=waterfetch,
-                                                       timelag=lags[4],dummy_country,dummy_month,dummy_year,mc.cores=numcores))
+                                                       timelag=lags[4],dummy_country,dummy_month,dummy_year,dummy_county,mc.cores=numcores))
 climate_364d365dl <- do.call(rbind.data.frame,mclapply(climatevar,batchlm,dependent=waterfetch$hv204,data=waterfetch,
-                                                       timelag=lags[5],dummy_country,dummy_month,dummy_year,mc.cores=numcores))
+                                                       timelag=lags[5],dummy_country,dummy_month,dummy_year,dummy_county,mc.cores=numcores))
 
 allclimatelags <- rbind(climate_6d7dl,climate_29d30dl,climate_89d90dl,
                         climate_179d180dl,climate_364d365dl)

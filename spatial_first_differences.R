@@ -1,134 +1,150 @@
 #############################
-# Code to run all spatial first differences regressions
+# Run all SFD regressions
+# Running regressions by randomly selecting one for each grid
+# and iterating n times
+# Feb 25, 2020 Updated Nov 2, 2020
 # Abby Harvey
-# Updated Dec 21, 2023
 
+# Must run from same directory that contains waterfetch.rds file
 
+rm(list=ls())
 # Overall parameters to change
 datasubset <- "all" # enter either urban, rural, elec, noelec, or all
 secondsubset <- "all" # Should be different than datasubset, or "all"
-reps <- 1000 #If using s1 method, specify number of replicates; otherwise, value does not matter
+chirpsize <- 0.50 #enter either 0.25 for default, or 0.5 for larger grid sizes
+chirpmaxgap <- 1 #enter any number between 1 and ~20
+cpcmaxgap <- 1 #enter any number between 1 and ~20, but generally 1 works best
+reps <- 1 #If using s1 method, specify number of replicates; otherwise, value does not matter
+type <- "s1" #don't change
 
 # This file will subset data as specified,
 # run the SFD regressions,
 # and output one csv file containing all results
 
 # The filename used to save results will be:
-# sfd_datasubset.csv
+# sfd_type_datasubset_chirpsize_chirpmaxgap_cpcmaxgap.csv
 
 if (identical(secondsubset,"all")){
-  filename <- paste("climatesfd",datasubset,reps,sep="_")
+  filename <- paste("maxpairs",datasubset,chirpsize,reps,sep="_")
 } else {
-  filename <- paste("climatesfd",datasubset,secondsubset,"nit",reps,sep="_")  
+  filename <- paste("maxpairs",datasubset,secondsubset,chirpsize,"nit",reps,sep="_")  
 }
-filename <- paste0(filename,".csv")
+filename <- paste(filename,"csv",sep=".")
+# By default, cluster standard errors at clusterid and lat or lon channel
+# And standard error calculation method is using vcovHC from sandwich, HC3
+
+# for parameter values, CASE MATTERS - DO NOT CAPITALIZE
 
 # Load in required packages
 library('data.table')
 library('sandwich')
 library('lmtest')
 library('dplyr')
+options(dplyr.summarise.inform = FALSE)
 
 # Load in water-fetch data
 waterfetch <- readRDS('waterfetch.rds')
 
-############## Inputting SFD prep function ##############################
-sfd_prep <- function(survey_year,waterfetch,preptype,direction,CPClat,CPClon){
-  # Calculates first differences spatially, survey-by-survey
-  # Running this function once will only calculate for one survey, not all
-  # Need to use lapply to run this on all surveys and compile results
+##### Max pairs differencing ######
+max_pairs_diff <- function(survey_year,waterfetch,direction,CPClat,CPClon){
   
-  # Subset to given survey
-  waterfetch.survey <- subset(waterfetch,survey%in%survey_year)
-  
-  # Appending lat & lon grid number to data points
-  waterfetch.survey$latcell <- cut(waterfetch.survey$latnum,CPClat,labels=FALSE)
-  waterfetch.survey$loncell <- cut(waterfetch.survey$longnum,CPClon,labels=FALSE)
+  survey1 <- filter(waterfetch,survey==survey_year)
   
   # Specifying climate variables to keep
   climatevar <- c('tmax','precip')
   lags <- c('6d7dl','13d7dl','29d30dl','59d30dl','89d90dl','179d180dl','364d365dl')
-  allvar.regress <- c("hv204",unlist(lapply(climatevar,paste,lags,sep="")))
-  lagsc <- c('6d7dc_mean','13d7dc_mean','29d30dc_mean','59d30dc_mean','89d90dc_mean','364d365dc_mean')
-  # Keeping all variables we need
-  allvar <- c(allvar.regress,"latcell","loncell","survey","hv025","new_hv206","datetime",unlist(lapply(climatevar,paste,lagsc,sep="")))
+  allvar.regress <- c("hv204",unlist(lapply(climatevar,paste,lags,sep="")),"hv025","new_hv206")
+  # Keeping other descriptive vars
+  keyvars <- c("latcell","loncell","survey","datetime")
   
+  # mark cells
+  survey1$latcell <- cut(survey1$latnum,CPClat,labels=FALSE)
+  survey1$loncell <- cut(survey1$longnum,CPClon,labels=FALSE)
   
-  if (identical(direction,'lon')){
-    #sort by lat then lon
-    waterfetch.survey <- waterfetch.survey[order(waterfetch.survey$latcell,waterfetch.survey$loncell), ]
+  if (direction=='lon'){
+    # identify cells with adjacent neighbors
+    test <- survey1 %>% group_by(latcell,loncell) %>% summarize(n=n())
+    test$latcelldiff <- test$latcell-lag(test$latcell,1)
+    test$loncelldiff <- test$loncell-lag(test$loncell,1)
     
-    # Subsetting to only needed variables
-    waterfetch.survey <- waterfetch.survey[,names(waterfetch.survey)%in%allvar]
+    coords_diff <- test %>% filter(latcelldiff==0&loncelldiff==1) %>%
+      select(latcell,loncell)
     
-    if (identical(preptype,'mean')){
-      # Averaging all climate variables by unique lat-lon combinations
-      waterfetch.grids <- waterfetch.survey %>%
-        group_by(latcell,loncell) %>%
-        summarise_each(funs(mean(., na.rm=TRUE)))
-    } else if (identical(preptype,'s1')){
-      # Randomly select one data point per unique lat-lon combinations
-      waterfetch.grids <- waterfetch.survey %>%
-        group_by(latcell,loncell) %>%
-        sample_n(.,1)
-    } else {print('Invalid type - must be mean or s1')}
+    if (nrow(coords_diff)==0){
+      return()
+    }
     
-    #Creating variables to tell of each point's relationship to the preceding point
-    waterfetch.grids$latcelldiff <- waterfetch.grids$latcell-lag(waterfetch.grids$latcell,1)
-    waterfetch.grids$loncelldiff <- waterfetch.grids$loncell-lag(waterfetch.grids$loncell,1)
-    waterfetch.grids$daydiff <- NA
-    if (nrow(waterfetch.grids)>2){
-      for (i in 2:nrow(waterfetch.grids)){
-        if ((!is.na(waterfetch.grids$datetime[i]))&(!is.na(waterfetch.grids$datetime[i-1]))){
-          waterfetch.grids$daydiff[i] <- daydiff(waterfetch.grids$datetime[i],waterfetch.grids$datetime[i-1])
-        }
-      }}
-    diff <- waterfetch.grids[,names(waterfetch.grids)%in%allvar.regress]
-    diff <- diff-mutate_all(diff,lag)
-    colnames(diff) <- paste(colnames(diff),"sfd",sep=".")
-    waterfetch.sfd <- data.frame(waterfetch.grids,diff)
-    waterfetch.sfd <- filter(waterfetch.sfd,latcelldiff==0&loncelldiff==1)
-  } else if (identical(direction,'lat')){
-    # Subsetting to only needed variables
-    waterfetch.survey <- waterfetch.survey[,names(waterfetch.survey)%in%allvar]
-    waterfetch.survey <- waterfetch.survey[order(waterfetch.survey$loncell,waterfetch.survey$latcell), ]
+    wf_output <- data.frame()
+    # build database that grows with every iteration?
+    for (i in 1:nrow(coords_diff)){
+      coords2 <- coords_diff[i,]
+      coords1 <- c(coords2$latcell,coords2$loncell-1)
+      
+      wf_coords1 <- filter(survey1,latcell==coords2$latcell&loncell==coords2$loncell)
+      wf_coords2 <- filter(survey1,latcell==coords1[1],loncell==coords1[2])
+      
+      npairs <- min(c(nrow(wf_coords1),nrow(wf_coords2)))
+      
+      key_vars <- wf_coords1[1,] %>% select(all_of(keyvars))
+      wf1 <- wf_coords1 %>%
+        sample_n(.,npairs)
+      wf2 <- wf_coords2 %>%
+        sample_n(.,npairs)
+      
+      wf_todiff1 <- wf1 %>% select(all_of(allvar.regress))
+      wf_todiff2 <- wf2 %>% select(all_of(allvar.regress))
+      
+      
+      # differencing
+      wf_diff <- wf_todiff2 - wf_todiff1
+      
+      temp_out <- data.frame(key_vars,wf_diff,wf1$latnum,wf1$longnum,wf2$latnum,wf2$longnum)
+      wf_output <- rbind(wf_output,temp_out)
+    }
+  } else if (direction=='lat'){
+    # identify cells with adjacent neighbors
+    test <- survey1 %>% group_by(loncell,latcell) %>% summarize(n=n())
+    test$latcelldiff <- test$latcell-lag(test$latcell,1)
+    test$loncelldiff <- test$loncell-lag(test$loncell,1)
     
-    if (identical(preptype,'mean')){
-      # Averaging all climate variables by unique lat-lon combinations
-      waterfetch.grids <- waterfetch.survey %>%
-        group_by(loncell,latcell) %>%
-        summarise_each(funs(mean(., na.rm=TRUE)))
-    } else if (identical(preptype,'s1')){
-      # Randomly select one data point per unique lat-lon combinations
-      waterfetch.grids <- waterfetch.survey %>%
-        group_by(loncell,latcell) %>%
-        sample_n(.,1)
-    } else {print('Invalid type - must be mean or s1')}
+    coords_diff <- test %>% filter(latcelldiff==1&loncelldiff==0) %>%
+      select(latcell,loncell)
     
-    #Creating variables to tell of each point's relationship to the preceding point
-    waterfetch.grids$latcelldiff <- waterfetch.grids$latcell-lag(waterfetch.grids$latcell,1)
-    waterfetch.grids$loncelldiff <- waterfetch.grids$loncell-lag(waterfetch.grids$loncell,1)
-    waterfetch.grids$daydiff <- NA
-    if (nrow(waterfetch.grids)>2){
-      for (i in 2:nrow(waterfetch.grids)){
-        if ((!is.na(waterfetch.grids$datetime[i]))&(!is.na(waterfetch.grids$datetime[i-1]))){
-          waterfetch.grids$daydiff[i] <- daydiff(waterfetch.grids$datetime[i],waterfetch.grids$datetime[i-1])
-        }
-      }}
-    diff <- waterfetch.grids[,names(waterfetch.grids)%in%allvar.regress]
-    diff <- diff-mutate_all(diff,lag)
-    colnames(diff) <- paste(colnames(diff),"sfd",sep=".")
-    waterfetch.sfd <- data.frame(waterfetch.grids,diff)
-    waterfetch.sfd <- filter(waterfetch.sfd,latcelldiff==1&loncelldiff==0)
+    if (nrow(coords_diff)==0){
+      return()
+    }
+    wf_output <- data.frame()
+    # build database that grows with every iteration?
+    for (i in 1:nrow(coords_diff)){
+      coords2 <- coords_diff[i,]
+      coords1 <- c(coords2$latcell-1,coords2$loncell)
+      
+      wf_coords1 <- filter(survey1,latcell==coords2$latcell&loncell==coords2$loncell)
+      wf_coords2 <- filter(survey1,latcell==coords1[1],loncell==coords1[2])
+      
+      npairs <- min(c(nrow(wf_coords1),nrow(wf_coords2)))
+      
+      key_vars <- wf_coords1[1,] %>% select(all_of(keyvars))
+      wf1 <- wf_coords1 %>%
+        sample_n(.,npairs)
+      wf2 <- wf_coords2 %>%
+        sample_n(.,npairs)
+      
+      wf_todiff1 <- wf1 %>% select(all_of(allvar.regress))
+      wf_todiff2 <- wf2 %>% select(all_of(allvar.regress))
+      
+      
+      # differencing
+      wf_diff <- wf_todiff2 - wf_todiff1
+      
+      temp_out <- data.frame(key_vars,wf_diff,wf1$latnum,wf1$longnum,wf2$latnum,wf2$longnum)
+      wf_output <- rbind(wf_output,temp_out)
+    }
   }
-  if (nrow(waterfetch.sfd)){
-    waterfetch.sfd$survey <- survey_year
-    waterfetch.sfd$dir <- direction}
-  return(waterfetch.sfd)
+  return(wf_output)
 }
 
-############## Inputting SFD batchlm function ###########################
-sfd.batchlm <- function(climatevar,dependent,data,timelag,direction,...){
+sfd.batchlm <- function(climatevar,dependent,data,timelag,direction){
   #This is a function to run batch regressions using lm on SFD data
   if (identical(direction,'lon')){errordir <- 'latcell'
   } else if (identical(direction,'lat')){errordir <- 'loncell'
@@ -137,13 +153,22 @@ sfd.batchlm <- function(climatevar,dependent,data,timelag,direction,...){
   errors <- c("survey",errordir)
   lmresult <- data.frame()
   
-  climate <- paste(climatevar,timelag,".sfd",sep="")
-  rframe <- data.frame(dependent,data[,climate],...)#create data frame for regressions
+  climate <- paste(climatevar,timelag,sep="")
+  rframe <- data.frame(dependent,data[,climate])#create data frame for regressions
+  names(rframe)[2] <- 'climatevar1'
   # Run lm
-  model <- lm(dependent~., data=rframe)
+  model <- lm(dependent~climatevar1, data=rframe)
   modelvcov <- coeftest(model, vcov=vcovHC(model,type="HC3",cluster=errors))
   # Save output as row in data frame
   rownames(modelvcov)[2] <- climate
+  # 
+  # temp_stats <- cbind(summary(model)$df[2],summary(model)$r.squared,summary(model)$adj.r.squared,summary(model)$sigma,summary(model)$fstatistic[1],mean(abs(data$daydiff)))
+  # 
+  # sink(filename,append=T)
+  # write.table(modelvcov,sep=",",row.names=F)
+  # write.table(temp_stats)
+  # sink()
+  
   modelsum <- data.frame(row.names=1)
   count=1
   for (term in rownames(modelvcov)){
@@ -156,8 +181,8 @@ sfd.batchlm <- function(climatevar,dependent,data,timelag,direction,...){
     modelsum <- cbind(modelsum,temp)
     count=count+1
   }
-  temp2 <- cbind(summary(model)$df[2],summary(model)$r.squared,summary(model)$adj.r.squared,summary(model)$sigma,summary(model)$fstatistic[1],mean(abs(data$daydiff)),modelsum)
-  colnames(temp2)[1:6] <- c('n','R_squared','Adj_r_squared','sigma','fstatistic','daydiff')
+  temp2 <- cbind(summary(model)$df[2],summary(model)$r.squared,summary(model)$adj.r.squared,summary(model)$sigma,summary(model)$fstatistic[1],modelsum)
+  colnames(temp2)[1:6] <- c('n','R_squared','Adj_r_squared','sigma','fstatistic','name1')
   lmresult <- structure(rbind(lmresult,temp2),.Names=names(temp2))
   lmresult$dir <- direction
   return(lmresult)
@@ -197,25 +222,23 @@ for (var in 1:length(allprecip)){
   waterfetch[,allspei[var]] <- waterfetch[,allspei[var]]/precipWeeks[var]
 }
 
-
 # Preparing SFD data - for both chirp and CPC data
 # Lat & lon spacing of CPC data (tmin, tmax, and CDD)
 CPClat <- seq(-30.75,22.25,0.5)
 CPClon <- seq(-17.75,50.75,0.5)
 
 # Lat & lon spacing of chirp data (precip, surplus)
-chirplat <- seq(-30.625,21.875,0.5)
-chirplon <- seq(-17.625,50.625,0.5)
+chirplat <- seq(-30.625,21.875,chirpsize)
+chirplon <- seq(-17.625,50.625,chirpsize)
 
 # allyear <- sort(unique(waterfetch$year))
 allsurvey <- unique(waterfetch$survey)
 
+sfd.data.cpc.lon <- replicate(reps,do.call(rbind.data.frame,lapply(allsurvey,max_pairs_diff,waterfetch,'lon',CPClat,CPClon)),simplify=FALSE)
+sfd.data.cpc.lat <- replicate(reps,do.call(rbind.data.frame,lapply(allsurvey,max_pairs_diff,waterfetch,'lat',CPClat,CPClon)),simplify=FALSE)
 
-sfd.data.cpc.lon <- replicate(reps,do.call(rbind.data.frame,lapply(allsurvey,sfd_prep,waterfetch,'s1','lon',CPClat,CPClon)),simplify=FALSE)
-sfd.data.cpc.lat <- replicate(reps,do.call(rbind.data.frame,lapply(allsurvey,sfd_prep,waterfetch,'s1','lat',CPClat,CPClon)),simplify=FALSE)
-
-sfd.data.chirp.lon <- replicate(reps,do.call(rbind.data.frame,lapply(allsurvey,sfd_prep,waterfetch,'s1','lon',chirplat,chirplon)),simplify=FALSE)
-sfd.data.chirp.lat <- replicate(reps,do.call(rbind.data.frame,lapply(allsurvey,sfd_prep,waterfetch,'s1','lat',chirplat,chirplon)),simplify=FALSE)
+sfd.data.chirp.lon <- replicate(reps,do.call(rbind.data.frame,lapply(allsurvey,max_pairs_diff,waterfetch,'lon',chirplat,chirplon)),simplify=FALSE)
+sfd.data.chirp.lat <- replicate(reps,do.call(rbind.data.frame,lapply(allsurvey,max_pairs_diff,waterfetch,'lat',chirplat,chirplon)),simplify=FALSE)
 
 #########################################
 # Scaling climate variables
@@ -224,53 +247,54 @@ allclimatevar.sfd <- unlist(lapply(climatevar,paste,lags,".sfd",sep=""))
 
 allresult.lat <- list()
 allresult.lon <- list()
+
 ##################################
 # Running regressions
 # Running batchlm for each lag
 for (rep in 1:reps){
-  sfd.lon_cpc_6d7dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204.sfd,
+  sfd.lon_cpc_6d7dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204,
                                                        data=sfd.data.cpc.lon[[rep]],timelag=lags[1],direction='lon'))
-  sfd.lat_cpc_6d7dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204.sfd,
+  sfd.lat_cpc_6d7dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204,
                                                        data=sfd.data.cpc.lat[[rep]],timelag=lags[1],direction='lat'))
-  sfd.lon_chirp_6d7dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204.sfd,
+  sfd.lon_chirp_6d7dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204,
                                                          data=sfd.data.chirp.lon[[rep]],timelag=lags[1],direction='lon'))
-  sfd.lat_chirp_6d7dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204.sfd,
+  sfd.lat_chirp_6d7dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204,
                                                          data=sfd.data.chirp.lat[[rep]],timelag=lags[1],direction='lat'))
   
-  sfd.lon_cpc_29d30dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204.sfd,
+  sfd.lon_cpc_29d30dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204,
                                                          data=sfd.data.cpc.lon[[rep]],timelag=lags[2],direction='lon'))
-  sfd.lat_cpc_29d30dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204.sfd,
+  sfd.lat_cpc_29d30dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204,
                                                          data=sfd.data.cpc.lat[[rep]],timelag=lags[2],direction='lat'))
-  sfd.lon_chirp_29d30dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204.sfd,
+  sfd.lon_chirp_29d30dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204,
                                                            data=sfd.data.chirp.lon[[rep]],timelag=lags[2],direction='lon'))
-  sfd.lat_chirp_29d30dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204.sfd,
+  sfd.lat_chirp_29d30dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204,
                                                            data=sfd.data.chirp.lat[[rep]],timelag=lags[2],direction='lat'))
   
-  sfd.lon_cpc_89d90dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204.sfd,
+  sfd.lon_cpc_89d90dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204,
                                                          data=sfd.data.cpc.lon[[rep]],timelag=lags[3],direction='lon'))
-  sfd.lat_cpc_89d90dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204.sfd,
+  sfd.lat_cpc_89d90dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204,
                                                          data=sfd.data.cpc.lat[[rep]],timelag=lags[3],direction='lat'))
-  sfd.lon_chirp_89d90dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204.sfd,
+  sfd.lon_chirp_89d90dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204,
                                                            data=sfd.data.chirp.lon[[rep]],timelag=lags[3],direction='lon'))
-  sfd.lat_chirp_89d90dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204.sfd,
+  sfd.lat_chirp_89d90dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204,
                                                            data=sfd.data.chirp.lat[[rep]],timelag=lags[3],direction='lat'))
   
-  sfd.lon_cpc_179d180dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204.sfd,
+  sfd.lon_cpc_179d180dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204,
                                                            data=sfd.data.cpc.lon[[rep]],timelag=lags[4],direction='lon'))
-  sfd.lat_cpc_179d180dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204.sfd,
+  sfd.lat_cpc_179d180dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204,
                                                            data=sfd.data.cpc.lat[[rep]],timelag=lags[4],direction='lat'))
-  sfd.lon_chirp_179d180dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204.sfd,
+  sfd.lon_chirp_179d180dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204,
                                                              data=sfd.data.chirp.lon[[rep]],timelag=lags[4],direction='lon'))
-  sfd.lat_chirp_179d180dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204.sfd,
+  sfd.lat_chirp_179d180dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204,
                                                              data=sfd.data.chirp.lat[[rep]],timelag=lags[4],direction='lat'))
   
-  sfd.lon_cpc_364d365dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204.sfd,
+  sfd.lon_cpc_364d365dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lon[[rep]]$hv204,
                                                            data=sfd.data.cpc.lon[[rep]],timelag=lags[5],direction='lon'))
-  sfd.lat_cpc_364d365dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204.sfd,
+  sfd.lat_cpc_364d365dl <- do.call(rbind.data.frame,lapply(climatevar_CPC,sfd.batchlm,dependent=sfd.data.cpc.lat[[rep]]$hv204,
                                                            data=sfd.data.cpc.lat[[rep]],timelag=lags[5],direction='lat'))
-  sfd.lon_chirp_364d365dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204.sfd,
+  sfd.lon_chirp_364d365dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lon[[rep]]$hv204,
                                                              data=sfd.data.chirp.lon[[rep]],timelag=lags[5],direction='lon'))
-  sfd.lat_chirp_364d365dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204.sfd,
+  sfd.lat_chirp_364d365dl <- do.call(rbind.data.frame,lapply(climatevar_chirp,sfd.batchlm,dependent=sfd.data.chirp.lat[[rep]]$hv204,
                                                              data=sfd.data.chirp.lat[[rep]],timelag=lags[5],direction='lat'))
   
   
@@ -294,29 +318,40 @@ allresult.lat <- do.call(rbind.data.frame,allresult.lat)
 
 allsfd.lon.summary <- allresult.lon %>%
   group_by(VarName2) %>%
-  summarise_each(funs(mean(., na.rm=TRUE)))
+  summarize(n=mean(n),
+            R_squared=mean(R_squared),
+            Adj_r_squared=mean(Adj_r_squared),
+            sigma=mean(sigma),
+            fstatistic=mean(fstatistic),
+            intercept=mean(Estimate1,na.rm=T),
+            interceptsd=sd(Estimate1,na.rm=T),
+            poly1=(mean(Estimate2, na.rm=T)),
+            poly1sd=sd(Estimate2,na.rm=T),
+            poly2=mean(Estimate3,na.rm=T),
+            poly2sd=sd(Estimate3,na.rm=T),
+            poly3=mean(Estimate4,na.rm=T),
+            poly3sd=sd(Estimate4,na.rm=T))
 
 allsfd.lon.summary$dir <- 'lon'
 
 allsfd.lat.summary <- allresult.lat %>%
   group_by(VarName2) %>%
-  summarise_each(funs(mean(., na.rm=TRUE)))
+  summarize(n=mean(n),
+            R_squared=mean(R_squared),
+            Adj_r_squared=mean(Adj_r_squared),
+            sigma=mean(sigma),
+            fstatistic=mean(fstatistic),
+            intercept=mean(Estimate1,na.rm=T),
+            interceptsd=sd(Estimate1,na.rm=T),
+            poly1=(mean(Estimate2, na.rm=T)),
+            poly1sd=sd(Estimate2,na.rm=T),
+            poly2=mean(Estimate3,na.rm=T),
+            poly2sd=sd(Estimate3,na.rm=T),
+            poly3=mean(Estimate4,na.rm=T),
+            poly3sd=sd(Estimate4,na.rm=T))
 
 allsfd.lat.summary$dir <- 'lat'
 
-
-lon.Estimate2.Std <- allresult.lon %>%
-  group_by(VarName2) %>%
-  summarise(sigma=sd(Estimate2,na.rm=TRUE))
-allsfd.lon.summary$Estimate2.Std.sigma <- lon.Estimate2.Std$sigma
-
-lat.Estimate2.Std <- allresult.lat %>%
-  group_by(VarName2) %>%
-  summarise(sigma=sd(Estimate2,na.rm=TRUE))
-allsfd.lat.summary$Estimate2.Std.sigma <- lat.Estimate2.Std$sigma
-
 # Write to csv
-sink(filename)
-write.table(allsfd.lon.summary,sep=",",row.names=F)
-write.table(allsfd.lat.summary,sep=",", col.names = F,row.names=F)
-sink()
+write.table(allsfd.lon.summary,filename,sep=",",row.names=F)
+write.table(allsfd.lat.summary,filename,sep=",", col.names = F,row.names=F,append=TRUE)
