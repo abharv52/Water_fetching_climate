@@ -18,4 +18,6 @@ Included are:
 2. The codebook for the combined dataset, including all variable definitions
 3. Code to run the fixed effects models on the full dataset
 4. Code to run the spatial first differences models on the full dataset.
+5. Code to assign data to Koppen-Geiger climate categories (in the climate_categorizations folder)
+6. The source data file for Figures 4 & 5 of the manuscript
 * Note - to run the full dataset through the spatial first differences code will take >12 hours
